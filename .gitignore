@@ -1,0 +1,14 @@
+# Reviewer-only files — never expose to candidates
+SOLUTION_TEMPLATE.md
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+
+# OS
+.DS_Store
+Thumbs.db
