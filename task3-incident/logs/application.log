@@ -1,0 +1,19 @@
+2026-10-01T14:32:11Z WARN  [helios-api] Failed to acquire DB connection after 5000ms
+2026-10-01T14:32:11Z ERROR [helios-api] PrismaClientInitializationError: Can't reach database server at `helios-ai-prod-app.proxy-abc123.ap-southeast-3.rds.amazonaws.com:5432`
+2026-10-01T14:32:11Z ERROR [helios-api] Please make sure your database server is running at `helios-ai-prod-app.proxy-abc123.ap-southeast-3.rds.amazonaws.com:5432`.
+2026-10-01T14:32:12Z ERROR [helios-api] Error: connect ETIMEDOUT 10.10.16.45:5432
+2026-10-01T14:32:12Z ERROR [helios-api] at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1189:16)
+2026-10-01T14:32:15Z WARN  [helios-api] Retrying DB connection (attempt 2/3)...
+2026-10-01T14:32:20Z ERROR [helios-api] All DB connection attempts exhausted. Returning 503.
+2026-10-01T14:32:20Z ERROR [helios-api] POST /api/chat 503 Service Unavailable
+2026-10-01T14:32:21Z ERROR [helios-api] POST /api/chat 503 Service Unavailable
+2026-10-01T14:32:22Z ERROR [helios-api] POST /api/chat 503 Service Unavailable
+2026-10-01T14:33:01Z INFO  [helios-worker] Starting job processor...
+2026-10-01T14:33:02Z ERROR [helios-worker] Redis connection failed: Error: connect ECONNREFUSED
+2026-10-01T14:33:02Z ERROR [helios-worker] at TCPConnectWrap.afterConnect
+2026-10-01T14:33:02Z ERROR [helios-worker] Redis URL: redis://master.helios-ai-prod-valkey.abc.apse3.cache.amazonaws.com:6379
+2026-10-01T14:33:02Z WARN  [helios-worker] Job queue unavailable — worker entering idle state
+2026-10-01T14:33:15Z ERROR [helios-llm-gateway] upstream connect error or disconnect/reset before headers. reset reason: connection failure
+2026-10-01T14:33:18Z ERROR [helios-api] POST /api/chat 503 Service Unavailable
+2026-10-01T14:34:00Z ERROR [helios-api] POST /api/chat 503 Service Unavailable
+2026-10-01T14:34:01Z ERROR [helios-api] POST /api/chat 503 Service Unavailable

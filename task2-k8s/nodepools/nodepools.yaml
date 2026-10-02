@@ -1,0 +1,57 @@
+# ==============================================================================
+# Helios AI — Karpenter NodePools
+#
+# TASK: Design two NodePools for the LLM Gateway workload.
+#
+# Context:
+#   The Helios AI LLM Gateway runs two types of workloads:
+#
+#   1. APP workload (llm-gateway Deployment)
+#      - Stateless, horizontally scalable
+#      - Tolerates brief interruptions (retry logic in place)
+#      - CPU-intensive: handles prompt routing and load balancing
+#      - Current usage: 2-8 pods, each requesting 2 CPU / 4Gi memory
+#      - Cost optimization is a priority
+#
+#   2. DB workload (postgres StatefulSet, redis StatefulSet)
+#      - Stateful — data loss on node termination is catastrophic
+#      - Cannot be safely interrupted mid-transaction
+#      - Postgres: 4 CPU / 16Gi memory
+#      - Redis: 1 CPU / 2Gi memory
+#      - Availability is the priority — cost is secondary
+#
+# Requirements:
+#   - App NodePool: optimize for cost, allow spot instances
+#     Use compute-optimized + general purpose instance families
+#     Taint: workload=app:NoSchedule
+#     Maximum: 20 nodes, 80 CPU, 160Gi memory
+#
+#   - DB NodePool: optimize for stability, on-demand ONLY
+#     Use memory-optimized + general purpose instance families
+#     Taint: workload=db:NoSchedule
+#     Maximum: 4 nodes, 16 CPU, 64Gi memory
+#     Consolidation: DISABLED (never evict running DB nodes)
+#
+# Deliverable:
+#   Fill in both NodePool specs below and justify your decisions in SOLUTION.md.
+#   Pay attention to: disruption policy, instance family selection,
+#   capacity type, limits, and consolidation settings.
+# ==============================================================================
+
+---
+# YOUR APP NODEPOOL HERE
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: helios-ai-app
+spec:
+  # TODO: fill in template, limits, and disruption
+
+---
+# YOUR DB NODEPOOL HERE
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: helios-ai-db
+spec:
+  # TODO: fill in template, limits, and disruption

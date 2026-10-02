@@ -1,0 +1,70 @@
+# ==============================================================================
+# Helios AI — KEDA ScaledObject for LLM Gateway
+#
+# STATUS: BROKEN — contains multiple configuration errors
+#
+# Your tasks:
+#   1. Find and fix all bugs (marked BUG)
+#   2. Explain each fix in SOLUTION.md
+#
+# Context:
+#   - Mimir (metrics backend) runs in-cluster at:
+#     http://mimir-svc.monitoring.svc.cluster.local:9009/prometheus
+#   - LiteLLM exposes a Prometheus metric: litellm_requests_in_progress
+#   - The gateway should scale on: in-flight requests + P99 latency + CPU
+#   - All Prometheus queries use Mimir as the backend, not a public endpoint
+# ==============================================================================
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: helios-llm-gateway-so
+  namespace: helios-ai
+spec:
+  scaleTargetRef:
+    name: helios-llm-gateway
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 60
+  pollingInterval: 15
+
+  # BUG 1: fallback is missing entirely.
+  # If Prometheus/Mimir is unavailable, KEDA will scale to 0 by default.
+  # For a gateway service, scaling to 0 = complete outage.
+  # Add a fallback that holds the last known replica count (or a safe minimum).
+
+  triggers:
+    # Trigger 1: In-flight requests
+    - type: prometheus
+      metadata:
+        # BUG 2: serverAddress points to a public Prometheus endpoint.
+        # Mimir runs in-cluster — using an external address adds latency,
+        # may not be routable from within the cluster, and leaks metrics externally.
+        serverAddress: https://prometheus.helios-ai.io
+        metricName: litellm_requests_in_progress
+        query: sum(litellm_requests_in_progress{service="helios-llm-gateway"})
+        # BUG 3: threshold is a string, not a number. KEDA requires a string
+        # but the value must represent the per-replica target.
+        # Current value means scale-out starts when total in-flight > 1000.
+        # For a pod handling ~10 concurrent requests safely, this is way too high.
+        # Fix: set a threshold that triggers scale-out at ~10 req/pod.
+        threshold: "1000"
+
+    # Trigger 2: P99 latency
+    - type: prometheus
+      metadata:
+        serverAddress: https://prometheus.helios-ai.io  # BUG 2 (same)
+        metricName: llm_gateway_p99_latency
+        # BUG 4: This PromQL query is malformed — histogram_quantile requires
+        # a rate() over a time window, not a raw histogram metric.
+        # Fix the query to correctly compute P99 over a 5-minute window.
+        query: histogram_quantile(0.99, litellm_request_duration_seconds_bucket)
+        threshold: "30"
+
+    # Trigger 3: CPU utilization
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        # BUG 5: CPU trigger threshold is 200 — this means 200% CPU utilization,
+        # which is impossible on a single core and will never trigger.
+        # Fix: set a realistic threshold (e.g. 70 for 70% utilization).
+        value: "200"

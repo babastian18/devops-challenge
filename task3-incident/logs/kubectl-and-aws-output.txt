@@ -1,0 +1,73 @@
+# kubectl describe pod helios-api-7d9f8b6c4-xk2qp -n helios-ai
+Name:         helios-api-7d9f8b6c4-xk2qp
+Namespace:    helios-ai
+Node:         ip-10-10-68-45.ap-southeast-3.compute.internal/10.10.68.45
+Status:       Running
+IP:           100.64.4.17
+IPs:
+  IP:  100.64.4.17
+
+Containers:
+  helios-api:
+    Image: helios-ai/api:v2.1.4
+    Port: 8080/TCP
+    Environment:
+      DATABASE_URL: postgresql://helios_app:***@helios-ai-prod-app.proxy-abc123.ap-southeast-3.rds.amazonaws.com:5432/helios_app
+      REDIS_URL:    redis://master.helios-ai-prod-valkey.abc.apse3.cache.amazonaws.com:6379
+      REDIS_SSL:    "false"
+    Limits:
+      cpu:    2
+      memory: 4Gi
+    Requests:
+      cpu:    500m
+      memory: 1Gi
+
+Events:
+  Warning  BackOff  2m   kubelet  Back-off restarting failed container
+
+---
+
+# kubectl get events -n helios-ai --sort-by='.lastTimestamp' | tail -20
+LAST SEEN   TYPE      REASON              OBJECT                          MESSAGE
+5m          Warning   Unhealthy           pod/helios-api-7d9f8b6c4-xk2qp Readiness probe failed: HTTP probe failed with statuscode: 503
+4m          Warning   Unhealthy           pod/helios-api-7d9f8b6c4-xk2qp Readiness probe failed: HTTP probe failed with statuscode: 503
+3m          Normal    Pulling             pod/helios-api-7d9f8b6c4-xk2qp Pulling image "helios-ai/api:v2.1.4"
+2m          Warning   BackOff             pod/helios-api-7d9f8b6c4-xk2qp Back-off restarting failed container
+
+---
+
+# aws ec2 describe-network-acls --filters "Name=tag:Name,Values=helios-ai-prod-nacl-protected" \
+#   --query 'NetworkAcls[0].Entries' --output table
+
+RuleNumber | Protocol | Action | Egress | CidrBlock      | PortRange
+-----------|----------|--------|--------|----------------|----------
+100        | tcp      | allow  | false  | 10.10.64.0/20  | 5432-5432
+110        | tcp      | allow  | false  | 10.10.64.0/20  | 6379-6379
+100        | tcp      | allow  | true   | 10.10.64.0/20  | 1024-65535
+32767      | -1       | deny   | false  | 0.0.0.0/0      | -
+32767      | -1       | deny   | true   | 0.0.0.0/0      | -
+
+---
+
+# aws rds describe-db-proxies --db-proxy-name helios-ai-prod-app-proxy \
+#   --query 'DBProxies[0].{Status:Status,Endpoint:Endpoint,VpcSubnetIds:VpcSubnetIds}'
+{
+  "Status": "available",
+  "Endpoint": "helios-ai-prod-app.proxy-abc123.ap-southeast-3.rds.amazonaws.com",
+  "VpcSubnetIds": [
+    "subnet-0web1aaa",
+    "subnet-0web2bbb",
+    "subnet-0web3ccc"
+  ]
+}
+
+---
+
+# aws elasticache describe-replication-groups \
+#   --replication-group-id helios-ai-prod-valkey \
+#   --query 'ReplicationGroups[0].{TransitEncryptionEnabled:TransitEncryptionEnabled,TransitEncryptionMode:TransitEncryptionMode,AtRestEncryptionEnabled:AtRestEncryptionEnabled}'
+{
+  "TransitEncryptionEnabled": true,
+  "TransitEncryptionMode": "required",
+  "AtRestEncryptionEnabled": true
+}

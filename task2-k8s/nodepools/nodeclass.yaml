@@ -1,0 +1,29 @@
+# ==============================================================================
+# Helios AI — Karpenter NodeClass
+# This file is COMPLETE and correct. Do not modify.
+# ==============================================================================
+apiVersion: eks.amazonaws.com/v1
+kind: NodeClass
+metadata:
+  name: helios-ai-default
+spec:
+  amiFamily: AL2023
+  role: "KarpenterNodeRole-helios-ai-prod"
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: helios-ai-prod
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: helios-ai-prod
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        encrypted: true
+  metadataOptions:
+    httpTokens: required          # IMDSv2 enforced
+    httpPutResponseHopLimit: 1
+  tags:
+    Environment: prod
+    ManagedBy: karpenter
