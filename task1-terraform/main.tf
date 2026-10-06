@@ -41,35 +41,11 @@ module "rds" {
   rds_proxy_role_arn   = var.rds_proxy_role_arn
 }
 
-variable "aws_region" {
-  type    = string
-  default = "ap-southeast-3"
-}
-
-variable "cluster_name" {
-  type    = string
-  default = "helios-ai-prod"
-}
-
-variable "environment" {
-  type    = string
-  default = "prod"
-}
-
-variable "eks_node_sg_id" {
-  type        = string
-  description = "EKS node security group ID"
-}
-
-variable "db_username" {
-  type    = string
-  default = "helios_app"
-}
-
-variable "db_password" {
-  type      = string
-  sensitive = true
-}
-
-variable "db_secret_arn" { type = string }
+variable "aws_region"        { type = string; default = "ap-southeast-3" }
+variable "cluster_name"      { type = string; default = "helios-ai-prod" }
+variable "environment"       { type = string; default = "prod" }
+variable "eks_node_sg_id"    { type = string; description = "EKS node security group ID" }
+variable "db_username"       { type = string; default = "helios_app" }
+variable "db_password"       { type = string; sensitive = true }
+variable "db_secret_arn"     { type = string }
 variable "rds_proxy_role_arn" { type = string }
