@@ -200,27 +200,23 @@ For Subnet protected SG rds_proxy, add value of `idle_client_timeout = 1800`, `i
    - Connection that is totally unused (for example pod that die without closing connection) is finally cleaned up, so proxy resource dont leak.
 
 2. **`vpc_security_group_ids = [aws_security_group.rds_proxy.id]`**
-
    Why SG rds_proxy: This SG is specifically designed for proxy (via fix BUG 1 and 2):
    - Accept port 5432 from node SG and from pod CIDR `100.64.0.0/16`.
    - Only allowed outbound to rds SG on port 5432.
    - rds SG itself only accept from rds_proxy SG. So if proxy dont use this SG, proxy cannot get into RDS.
 
 3. **`vpc_subnet_ids = var.protected_subnet_ids`**
-
    Why protected:
    - Proxy only talk to two sides: pod (inbound) and RDS (outbound). Proxy dont need internet at all.
    - Proxy become one tier with RDS, so NACL protected from 1a also protecting it too.
 
 4. **`iam_auth = "DISABLED"`**
-
    Why DISABLED:
    - App use normal username/password. The proof is in task 3: `DATABASE_URL: postgresql://helios_app:***@...proxy...`, which contain static password in the connection string.
    - Proxy fetch credentials from Secrets Manager (`auth_scheme = "SECRETS"` and `secret_arn`) using IAM role `role_arn`.
 
 5. **`connection_borrow_timeout = 5`**
-
-   Fail fast. AWS default is 120 seconds. With 120 seconds, when DB is busy, hundreds of request will wait up to 2 minutes, app will be full of waiting requests, and the problem make everything broken.
+   - AWS default is 120 seconds. With 120 seconds, when DB is busy, hundreds of request will wait up to 2 minutes, app will be full of waiting requests, and the problem make everything broken.
 
 ---
 
@@ -230,7 +226,91 @@ For Subnet protected SG rds_proxy, add value of `idle_client_timeout = 1800`, `i
 [your answer]
 
 ### 2b: KEDA ScaledObject — Bugs Fixed
-[your answer]
+
+**1. Bug 1: No fallback defined**
+
+With existing configuration:
+
+```yaml
+spec:
+  scaleTargetRef:
+    name: helios-llm-gateway
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 60
+  pollingInterval: 15
+```
+
+If the failure happens (mimir/prometheus died) this will running on minimum pods 2, but as per context from `nodepools.yaml`, this application pods are running on daily usage 2-8. Which 2 is the lower bound and I marked as high probability issue. So I create fallback with upper bound number 8, and threshold failure 4 to create a better tolerable number of time.
+
+```yaml
+  fallback:
+    failureThreshold: 4   # 4 times failed asking for metrics. 4 x 15 (default periodSync) = 1 minute of unavailability before fallback triggers
+    replicas: 8           # safe number of replicas to hold if Prometheus is unavailable, in this context 2a pods helios-llm-gateway running in between 2-8 pods for daily usage.
+```
+
+**2. Bug 2: Wrong pointing of serverAddress**
+
+KEDA query public endpoint that might not contain this cluster metric or cannot be reached from inside the cluster, so scaling will use wrong data or fail, and it also add latency and leak metrics to outside.
+
+Mimir are internal svc with below details:
+
+```text
+mimir-svc . monitoring . svc . cluster.local : 9009 / prometheus
+   │           │                    │            │        └─ Mimir's Prometheus-compatible API path
+   │           │                    │            └─ port
+   │           │                    └─ cluster internal domain
+   │           └─ namespace
+   └─ Service name
+```
+
+So replacing the public endpoint prometheus with `http://mimir-svc.monitoring.svc.cluster.local:9009/prometheus` should be the best answer.
+
+**3. Bug 3: Threshold 1000**
+
+If the number of safe concurrent number for 1 pods are 10, so replacing the 1000 --> 10 might the options by below calculations logic:
+
+```text
+replica = ceil(total request / threshold)
+```
+
+If total request --> 50:
+
+- With threshold 1000 = ceil(50/1000) = 0.05 -> 1 pods marked as enough, which actually pods might be dropped bcs pods only able to resolve 10 connection safely. But this will fallback to default minimum pods: 2 (still not enough).
+- With threshold 10 = ceil(50/10) = 5 pods, which actually safe bcs each pods will handled at least ~10 concurrent connections.
+
+**4. Bug 4: P99 query**
+
+Problem is:
+
+- Without `rate()`, P99 is calculated from the whole history since the pod is alive. A latency spike in the last 5 minutes will "drown" inside millions of old requests, so the trigger will barely react.
+- Without `sum ... by (le)` (less or equal), the result is one value per pod, not one single number. KEDA need one number, so query with many results will error.
+
+Fix:
+
+```promql
+histogram_quantile(0.99,
+  sum(rate(litellm_request_duration_seconds_bucket{service="helios-llm-gateway"}[5m])) by (le)
+)
+```
+
+Why:
+
+- `rate(...[5m])`: rate per second in the last 5 minutes, so only the newest data is used.
+- `sum(...) by (le)`: combine all the pods, but keep the `le` label that is needed to calculate percentile.
+- `histogram_quantile(0.99, ...)`: calculate P99 from that combination.
+- `{service="helios-llm-gateway"}`: filter so it only take this gateway metric, same like trigger 1.
+
+**5. Bug 5: CPU threshold**
+
+Pods request from 2a mentioned 2 CPU. Pod cannot use CPU more than its limit. If limit is same like request (2 CPU), the max utilization is 100%, so the number 200 will never be reached and the CPU trigger is totally dead.
+
+Fix:
+
+- Change the threshold value into `70`.
+- Pod request 2 CPU (from context 2a), then it use 1.4 CPU, which means the utilization is 70%. This number is the safest number.
+
+---
 
 ## Task 3 — Incident
 

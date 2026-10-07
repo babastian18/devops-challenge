@@ -31,6 +31,9 @@ spec:
   # If Prometheus/Mimir is unavailable, KEDA will scale to 0 by default.
   # For a gateway service, scaling to 0 = complete outage.
   # Add a fallback that holds the last known replica count (or a safe minimum).
+  fallback:
+    failureThreshold: 4   # 4 times failed asking for metrics. 4 x 15 (default periodSync) = 1 minute of unavailability before fallback triggers
+    replicas: 8   # safe number of replicas to hold if Prometheus is unavailable , in this context 2a pods helios-llm-gateway running in between 2-8 pods for daily usage.
 
   triggers:
     # Trigger 1: In-flight requests
@@ -39,7 +42,7 @@ spec:
         # BUG 2: serverAddress points to a public Prometheus endpoint.
         # Mimir runs in-cluster — using an external address adds latency,
         # may not be routable from within the cluster, and leaks metrics externally.
-        serverAddress: https://prometheus.helios-ai.io
+        serverAddress: http://mimir-svc.monitoring.svc.cluster.local:9009/prometheus
         metricName: litellm_requests_in_progress
         query: sum(litellm_requests_in_progress{service="helios-llm-gateway"})
         # BUG 3: threshold is a string, not a number. KEDA requires a string
@@ -47,17 +50,17 @@ spec:
         # Current value means scale-out starts when total in-flight > 1000.
         # For a pod handling ~10 concurrent requests safely, this is way too high.
         # Fix: set a threshold that triggers scale-out at ~10 req/pod.
-        threshold: "1000"
+        threshold: "10"
 
     # Trigger 2: P99 latency
     - type: prometheus
       metadata:
-        serverAddress: https://prometheus.helios-ai.io  # BUG 2 (same)
+        serverAddress: http://mimir-svc.monitoring.svc.cluster.local:9009/prometheus  # BUG 2 (same)
         metricName: llm_gateway_p99_latency
         # BUG 4: This PromQL query is malformed — histogram_quantile requires
         # a rate() over a time window, not a raw histogram metric.
         # Fix the query to correctly compute P99 over a 5-minute window.
-        query: histogram_quantile(0.99, litellm_request_duration_seconds_bucket)
+        query: histogram_quantile(0.99,sum(rate(litellm_request_duration_seconds_bucket{service="helios-llm-gateway"}[5m])) by (le))
         threshold: "30"
 
     # Trigger 3: CPU utilization
@@ -67,4 +70,4 @@ spec:
         # BUG 5: CPU trigger threshold is 200 — this means 200% CPU utilization,
         # which is impossible on a single core and will never trigger.
         # Fix: set a realistic threshold (e.g. 70 for 70% utilization).
-        value: "200"
+        value: "70"
