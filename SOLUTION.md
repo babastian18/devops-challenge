@@ -2,6 +2,11 @@
 
 ### Assumptions and Findings
 
+Root main.tf (lines 44–49) used ";" inside single-line variable blocks, which is invalid HCL,
+so terraform init failed before validate could run. README says "do not modify" but also requires
+validate to pass, so I converted them to multi-line blocks. Syntax only: names, types, defaults,
+and module blocks are unchanged.
+
 ```text
 VPC (10.10.0.0/16) --> Main CIDR /16 --> 65.536 available IPs
 4 octets (32 bits)
