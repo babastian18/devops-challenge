@@ -223,6 +223,33 @@ For Subnet protected SG rds_proxy, add value of `idle_client_timeout = 1800`, `i
 5. **`connection_borrow_timeout = 5`**
    - AWS default is 120 seconds. With 120 seconds, when DB is busy, hundreds of request will wait up to 2 minutes, app will be full of waiting requests, and the problem make everything broken.
 
+**Test Results:**
+
+```text
+$ cd task1-terraform
+$ terraform init
+$ terraform validate
+Initializing the backend...
+
+Initializing modules...
+
+Initializing provider plugins...
+- Reusing previous version of hashicorp/aws from the dependency lock file
+- Using previously-installed hashicorp/aws v5.100.0
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+Success! The configuration is valid.
+```
+
+
 ---
 
 ## Task 2 — Kubernetes
@@ -372,6 +399,15 @@ Fix:
 - Change the threshold value into `70`.
 - Pod request 2 CPU (from context 2a), then it use 1.4 CPU, which means the utilization is 70%. This number is the safest number.
 
+**Test result:**
+
+```text
+$ kubectl apply --dry-run=client -f task2-k8s/nodepools/nodepools.yaml
+$ kubectl apply --dry-run=client -f task2-k8s/scaledobjects/llm-gateway-scaledobject.yaml
+nodepool.karpenter.sh/helios-ai-app created (dry run)
+nodepool.karpenter.sh/helios-ai-db created (dry run)
+scaledobject.keda.sh/helios-llm-gateway-so created (dry run)
+```
 ---
 
 ## Task 3 — Incident
