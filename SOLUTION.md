@@ -223,7 +223,64 @@ For Subnet protected SG rds_proxy, add value of `idle_client_timeout = 1800`, `i
 ## Task 2 — Kubernetes
 
 ### 2a: NodePool Design Decisions
-[your answer]
+
+**Assumptions**
+
+1. **NodeClass type.** `nodeclass.yaml` uses `eks.amazonaws.com/v1` `NodeClass` (EKS Auto Mode), but its fields (`amiFamily`, `blockDeviceMappings`, `metadataOptions`) belong to OSS Karpenter `EC2NodeClass`.
+   so both NodePools reference it as-is (`group: eks.amazonaws.com`, `kind: NodeClass`, `name: helios-ai-default`) and use `eks.amazonaws.com/*` instance labels to stay consistent.
+2. **Subnets / AZs.** NodeClass selects subnets by tag `karpenter.sh/discovery: helios-ai-prod`.
+   In Task 1 Terraform only the app subnets carry this tag, so nodes land in the 3 app subnets (3a/3b/3c).
+   No zone requirement in the NodePools, so Karpenter can use all 3 AZs.
+3. **Architecture.** `amd64` only. The app image is not confirmed multi-arch.
+   Graviton (`arm64`) could cut cost later if the image supports it.
+4. **System pods.** Both pools are tainted, so CoreDNS / Karpenter controller / other system pods are assumed to run on a separate system node group.
+
+**Design**
+
+1. **App pools:**
+   - `c` = compute-optimized, match for CPU-intensive prompt routing.
+   - `m` = general purpose. This add more instance type to spot pool, so less chance for spot capacity shortage or interruption.
+   - Gen > 5: newer generation give better price and performance.
+   - 8–16 vCPU:
+     - Lower bound: 8 vCPU node can fit 3 pods (2 CPU each) after system reserve.
+     - Upper bound: so we don't have one big node hold all pods. If single spot interruption happen, it will kill the whole gateway (blast radius).
+   - Capacity check:
+     - Normal: 8 pods → need 3 x 8 vCPU nodes = 24 CPU.
+     - KEDA max: 20 pods → need 7 nodes = 56 CPU / 112Gi (if use `c`). Still safe inside 80 CPU / 160Gi.
+   - Notes: if Karpenter choose `m` (32Gi per 8 vCPU), the 160Gi memory limit will hit at 5 nodes, which is only enough for like 15 pods. `c` is usually more cheap per vCPU so it is better, but this is known limit trade-off.
+
+2. **DB Pools:**
+   - `r` = memory-optimized. Postgres is good if use big buffer cache, and Redis keep all data in memory.
+   - `m` = general purpose. Better CPU and memory balance for the tight limit.
+   - 8 vCPU only:
+     - Postgres request 4 CPU, so it cannot fit in 4 vCPU node (allocatable is less than 4).
+     - 16 vCPU is useless: `r` 16 vCPU = 128Gi already pass the 64Gi limit, and `m` 16 vCPU = 64Gi will use all the pool in just one node.
+   - Notes: Limit analysis, 16 CPU / 64Gi means maximum only 2 nodes (2 x `m.2xlarge`), or 1 x `r.2xlarge` (64Gi already use all memory limit). So the `nodes: 4` limit is never the real problem. If want to reach 4 nodes, we must make the CPU and memory limit bigger first.
+
+**Spot vs On-Demand**
+
+- The app uses Spot with On-Demand as a backup because it's stateless and has retries mechanism enabled.
+- The DB uses On-Demand only because the 2-minute spot interruption notice is not enough for a database to shut down safely
+
+**Disruption**
+
+- The app uses consolidation to save costs.
+- The DB uses `Never`, budget `0`, and `expireAfter: Never` because consolidation, drift, and expiry can all kill the database.
+
+**Taint and Toleration**
+
+- Taints reject other pods, and `nodeSelector` to the `node_group` label pulls the right pods into its pool. Both are needed.
+- workload pods must have a matching toleration (`workload=app:NoSchedule` / `workload=db:NoSchedule`), otherwise they will get rejected by the taint and just stay Pending.
+
+**Potential Issue**
+
+1. **AMI Drift** = AMI is not pinned in the nodeclass.
+2. **App nodepools** = Nodes will rollout after reaching the 30-day `expireAfter` limit, and it can replaced together. budget wont handled it, only PDB can hold the rollout from pods application side.
+
+**Enhancement**
+
+1. **App nodepools** = Continuous rollout will happen if `consolidateAfter` is too short (1 minute). This won't tolerate pods with fast, dynamic usage.
+   Thats why i changed from `1m` -> `5m` this will align with HPA scale-down window. `1m` too aggressive, `1h` wastes cost after spikes.
 
 ### 2b: KEDA ScaledObject — Bugs Fixed
 
