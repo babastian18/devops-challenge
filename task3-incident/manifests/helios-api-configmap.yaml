@@ -4,5 +4,5 @@ metadata:
   name: helios-api-config
   namespace: helios-ai
 data:
-  REDIS_URL: "redis://master.helios-ai-prod-valkey.abc.apse3.cache.amazonaws.com:6379"
-  REDIS_SSL: "false"
+  REDIS_URL: "rediss://master.helios-ai-prod-valkey.abc.apse3.cache.amazonaws.com:6379"
+  REDIS_SSL: "true"
