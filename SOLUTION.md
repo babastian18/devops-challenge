@@ -372,10 +372,270 @@ Fix:
 ## Task 3 — Incident
 
 ### 3a: Root Cause Analysis
-[your answer]
+
+#### RC1: RDS Proxy is inside web subnet (public), and proxy SG dont allow pod CIDR
+
+**What happened?** helios-api cannot connect to database through RDS Proxy.
+
+**Evidence?**
+
+a. the output of `describe-db-proxies` show that `VpcSubnetIds` contain `subnet-0web1aaa`, `subnet-0web2bbb`, `subnet-0web3ccc`. all three is web subnet.
+
+```text
+# aws rds describe-db-proxies --db-proxy-name helios-ai-prod-app-proxy \
+#   --query 'DBProxies[0].{Status:Status,Endpoint:Endpoint,VpcSubnetIds:VpcSubnetIds}'
+{
+  "Status": "available",
+  "Endpoint": "helios-ai-prod-app.proxy-abc123.ap-southeast-3.rds.amazonaws.com",
+  "VpcSubnetIds": [
+    "subnet-0web1aaa",
+    "subnet-0web2bbb",
+    "subnet-0web3ccc"
+  ]
+}
+```
+
+b. In `application.log` there is connect `ETIMEDOUT 10.10.16.45:5432`. proxy endpoint is resolved to `10.10.16.45`, which is inside the range of Web[1] AZ-b (`10.10.16.0/20`, 10.10.16–31.x).
+This match with my CIDR calculation in task1.
+
+```text
+2026-10-01T14:32:12Z ERROR [helios-api] Error: connect ETIMEDOUT 10.10.16.45:5432
+```
+
+**Assumptions:** The error is `ETIMEDOUT`, not `ECONNREFUSED`. it means the packet is dropped silently by network layer (SG or NACL).
+If packet reach the proxy then get rejected, the error will be connection refused
+
+**Why it happened?** in Terraform there is no special NACL for web subnet, so web subnet use default NACL which is allow-all. this is just assumption,
+because web NACL output is not shown. So, the one that drop the packet is proxy SG. proxy SG only allow node SG (`var.eks_node_sg_id`), while the packet come from pod IP `100.64.4.17`. This is Task 1b BUG 2.
+
+**Why web subnet is wrong?** Web subnet has route `0.0.0.0/0 → IGW`, so the database tier is inside a tier that face the internet.
+there is hidden issue: even if pod→proxy is already working, the step proxy→RDS will also fail. RDS is in protected subnet, and protected NACL dont allow source `10.10.16.x` (web).
+
+#### RC2: NACL protected only allow 10.10.64.0/20 (node CIDR, AZ-a only)
+
+**What happend?** all traffic coming from pod to protected tier subnet is dropped, both Postgres (5432) and Redis (6379).
+
+**Evidence?**
+
+a. Protected NACL only allows `10.10.64.0/20` for 5432, 6379, and ephemeral egress. everything else hits rule 32767 DENY.
+
+```text
+# aws ec2 describe-network-acls --filters "Name=tag:Name,Values=helios-ai-prod-nacl-protected" \
+#   --query 'NetworkAcls[0].Entries' --output table
+
+RuleNumber | Protocol | Action | Egress | CidrBlock      | PortRange
+-----------|----------|--------|--------|----------------|----------
+100        | tcp      | allow  | false  | 10.10.64.0/20  | 5432-5432
+110        | tcp      | allow  | false  | 10.10.64.0/20  | 6379-6379
+100        | tcp      | allow  | true   | 10.10.64.0/20  | 1024-65535
+32767      | -1       | deny   | false  | 0.0.0.0/0      | -
+32767      | -1       | deny   | true   | 0.0.0.0/0      | -
+```
+
+b. The pod IP is `100.64.4.17` on node `10.10.68.45`.
+
+```text
+Name:         helios-api-7d9f8b6c4-xk2qp
+Namespace:    helios-ai
+Node:         ip-10-10-68-45.ap-southeast-3.compute.internal/10.10.68.45
+Status:       Running
+IP:           100.64.4.17
+IPs:
+  IP:  100.64.4.17
+```
+
+c. `100.64.4.17` is not inside `10.10.64.0/20`, so it is denied.
+`10.10.64.0/20` also covers only App[0] AZ-a, so nodes in AZ-b and AZ-c are blocked too.
+
+**Why it happened?** with VPC CNI custom networking, pods get IP from `100.64.0.0/16`. there is no SNAT for traffic inside VPC, so NACL see the pod IP (`100.64.4.17`), not node IP (`10.10.68.45`). NACL is also stateless so even if inbound is allow, the reply back to pod is dropped by egress rule (only to `10.10.64.0/20`).
+
+**Impact:**
+
+- a. Redis (6379): Valkey is in protected subnet, so pod -> Valkey is dropped directly.
+- b. Postgres (5432): not visible in log yet, because proxy is still in web subnet (RC1). once proxy is moved to protected, pod -> proxy will get dropped by this NACL too.
+
+#### RC3: Redis TLS mismatch (client plaintext, server require TLS)
+
+**What happened?** helios-worker cannot connect to Valkey, job queue is not available, and worker stay idle.
+
+**Evidence?**
+
+```text
+2026-10-01T14:33:02Z ERROR [helios-worker] Redis connection failed: Error: connect ECONNREFUSED
+```
+
+**Why it happened?** because from replications groups
+
+```text
+# aws elasticache describe-replication-groups \
+#   --replication-group-id helios-ai-prod-valkey \
+#   --query 'ReplicationGroups[0].{TransitEncryptionEnabled:TransitEncryptionEnabled,TransitEncryptionMode:TransitEncryptionMode,AtRestEncryptionEnabled:AtRestEncryptionEnabled}'
+{
+  "TransitEncryptionEnabled": true,
+  "TransitEncryptionMode": "required",
+  "AtRestEncryptionEnabled": true
+}
+```
+
+it mentioned ransitEncryptionEnabled: true and `TransitEncryptionMode: "required"` means server only accept TLS connection.
+but the ConfigMap uses plaintext on both settings: `REDIS_URL` uses the `redis://` scheme (TLS needs `rediss://`) and `REDIS_SSL` is `"false"`, so the client connects without TLS and the server rejects it.
+
+**My Reasoning:**
+with the current NACL, port 6379 from pod CIDR should be dropped and get `ETIMEDOUT`, before getting REFUSED.
+also, plaintext client connecting to Valkey with TLS required usually gets connection reset/closed in real life, not refused.
+but for now, log is assumed to represent TLS handshake failure; in real life condition,
+worker will hit two layer of problems: NACL (timeout) first, then TLS after NACL is opened.
+
+---
 
 ### 3b: Remediation Plan
-[your answer]
+
+**1.** change the configmap for SSL: false into `REDIS_SSL: "true"` and "redis//" to `"rediss://"` to switch with TLS and encrypted.
+
+```yaml
+data:
+  REDIS_URL: "rediss://master.helios-ai-prod-valkey.abc.apse3.cache.amazonaws.com:6379"
+  REDIS_SSL: "true"
+```
+
+**2.**
+
+```bash
+kubectl apply -f task3-incident/manifests/helios-api-configmap.yaml
+kubectl rollout restart deployment/helios-api -n helios-ai
+kubectl rollout restart deployment/helios-worker -n helios-ai # --> assumptions
+```
+
+**3.** change the terraform for NACL of protected subnet, example;
+
+```hcl
+resource "aws_network_acl_rule" "protected_inbound_postgres_pods" {
+  network_acl_id = aws_network_acl.protected.id
+  rule_number    = 101
+  egress         = false
+  protocol       = "tcp"
+  rule_action    = "allow"
+  cidr_block     = local.pod_cidr
+  from_port      = 5432
+  to_port        = 5432
+}
+```
+
+this method has been applied on task 1a, to allow `cidr_block` which previously defined on `local.pod_cidr`
+full set in `nacl.tf`: ingress 101 (5432) and 111 (6379) from pod CIDR, egress 101 ephemeral 1024-65535 to pod CIDR (NACL is stateless),
+and `app_cidr` widened from /20 to /18 to cover all 3 AZs. Rules 120/130 allow proxy -> RDS inside the protected tier.
+
+**4.** recreate rds proxy. this is needed because we required to change the subnet that will assigned to rds proxy. in this case
+changing from web subnet (public tier) into protected subnet.
+
+```hcl
+resource "aws_db_proxy" "app" {
+  vpc_security_group_ids = [aws_security_group.rds_proxy.id]
+  vpc_subnet_ids         = var.protected_subnet_ids
+}
+```
+
+replacing rds proxy will create the same endpoint proxy url as long as the name of the rds proxy are still same. (no pointin needed from application side, but still need further verification)
+and then for the rds proxy sg this require to attach new sg rule that has been created also on terraform task 1
+
+```hcl
+resource "aws_security_group_rule" "rds_proxy_ingress_from_pods" {
+  type              = "ingress"
+  from_port         = 5432
+  to_port           = 5432
+  protocol          = "tcp"
+  cidr_blocks       = ["100.64.0.0/16"]
+  security_group_id = aws_security_group.rds_proxy.id
+}
+```
+
+this to allow the connection from pods 100.64.x.x to rds proxy after NACL checking. (double layer).
+
+---
 
 ### 3c: Prevention
-[your answer]
+
+#### Issue 1: RDS Proxy in web subnet (public tier)
+
+**Prevention:** CI policy check config test on terraform plan JSON.
+rule: `aws_db_proxy`, `aws_db_subnet_group`, and ElastiCache can only use subnet that have tag `tier=protected`. requires adding tag `tier=protected` to the protected subnets. or enforce it in the module with variable validation
+
+**Why it catches it:** the PR will fail automatic before apply, dont care who write the code.
+
+**Example** `policy/subnet_tier.rego`
+
+```rego
+package main
+
+import rego.v1
+
+# Subnet IDs tagged tier=protected (requires the tag on aws_subnet.protected)
+protected_subnet_ids contains id if {
+	some mod in input.planned_values.root_module.child_modules
+	some r in mod.resources
+	r.type == "aws_subnet"
+	r.values.tags.tier == "protected"
+	id := r.values.id
+}
+
+# Resource type -> attribute that holds its subnet IDs
+subnet_attrs := {
+	"aws_db_proxy": "vpc_subnet_ids",
+	"aws_db_subnet_group": "subnet_ids",
+	"aws_elasticache_subnet_group": "subnet_ids",
+}
+
+deny contains msg if {
+	some change in input.resource_changes
+	attr := subnet_attrs[change.type]
+	some action in change.change.actions
+	action in {"create", "update"}
+	some subnet in change.change.after[attr]
+	not subnet in protected_subnet_ids
+	msg := sprintf("FAIL: %v uses subnet %v, which is not tagged tier=protected.", [change.address, subnet])
+}
+```
+
+Usage: `terraform plan -out=tfplan && terraform show -json tfplan > plan.json && conftest test plan.json`.
+Limitation: if the subnets are created in the same plan, their IDs are "known after apply", so this check works best once the subnets already exist.
+
+#### Issue 2: Protected NACL missing pod CIDR
+
+**Prevention:** IaC single source of truth. pod_cidr is just one variable/output from networking module, then reused by NACL, SG, and VPC CNI config. no more hardcoded CIDR in every rules.
+
+**Why it catches it:** if pod CIDR change, all rule follow automatic, so no rule is forgotten.
+
+**(optional) Monitoring:** VPC Flow Logs on protected subnet + alarm for REJECT count.
+
+#### Issue 3: Redis TLS mismatch
+
+**Prevention:** CI lint on manifest using conftest or kyverno that reject REDIS_URL starting with redis:// or REDIS_SSL "false" in prod.
+
+**(better way)** generate REDIS_URL directly from Terraform ElastiCache output, so the scheme follow transit_encryption_mode.
+
+**Why it catches it:** client config cannot be different from server setting, because it is checked or generated from the same source.
+
+**Example** `policy/redis_tls.rego`
+
+```rego
+package main
+
+import rego.v1
+
+# REDIS_URL comes from ConfigMap helios-api-config (via configMapKeyRef), so check the ConfigMap
+deny contains msg if {
+	input.kind == "ConfigMap"
+	input.metadata.namespace == "helios-ai"
+	startswith(input.data.REDIS_URL, "redis://")
+	msg := sprintf("FAIL: ConfigMap %v uses plaintext REDIS_URL. Use rediss:// because ElastiCache transit encryption is required.", [input.metadata.name])
+}
+
+deny contains msg if {
+	input.kind == "ConfigMap"
+	input.metadata.namespace == "helios-ai"
+	input.data.REDIS_SSL == "false"
+	msg := sprintf("FAIL: ConfigMap %v sets REDIS_SSL to \"false\". It must be \"true\" to match ElastiCache transit_encryption_mode.", [input.metadata.name])
+}
+```
+
+Usage: `conftest test task3-incident/manifests/helios-api-configmap.yaml`
